@@ -3,6 +3,20 @@
 Report a road incident on a real OpenStreetMap road network and watch the fastest route change.
 Java 21, Spring Boot 3.3, Dijkstra, Leaflet + OpenStreetMap. No database or Docker yet: incidents live in memory.
 
+## Demo
+
+**1. Fastest route on real OpenStreetMap roads**
+
+![Route](docs/root.png)
+
+**2. A road block is reported, and the route changes**
+
+![Road block](docs/roadblock.png)
+
+**3. Several incidents together, and the route adapts again**
+
+![Multiple incidents](docs/multiple%20incident.png)
+
 ## Run
 1. Open the folder in IntelliJ (pom.xml -> Open as Project), wait for Maven to finish.
 2. Run `TrafficApplication`.

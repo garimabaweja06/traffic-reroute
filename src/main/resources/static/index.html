@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Traffic Reroute - real roads</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <style>
+        * { box-sizing: border-box; }
+        body { margin: 0; font-family: system-ui, Arial, sans-serif; display: flex; height: 100vh; color: #1f2933; }
+        #side { width: 320px; padding: 14px; overflow-y: auto; border-right: 1px solid #d9dee3; background: #f7f9fa; }
+        #map { flex: 1; }
+        h1 { font-size: 18px; margin: 0 0 4px; }
+        .muted { color: #62707d; font-size: 12px; }
+        .banner { padding: 8px; border-radius: 6px; font-size: 12px; margin: 8px 0; background: #e7f5ec; border: 1px solid #9fd5b3; }
+        .banner.warn { background: #fff4d6; border-color: #e6c35c; }
+        .box { background: #fff; border: 1px solid #d9dee3; border-radius: 8px; padding: 10px; margin: 10px 0; }
+        .box h2 { font-size: 13px; margin: 0 0 6px; text-transform: uppercase; letter-spacing: .04em; color: #62707d; }
+        button { cursor: pointer; border: 1px solid #b8c1ca; background: #fff; border-radius: 6px; padding: 6px 10px; font-size: 13px; }
+        button.primary { background: #1f6feb; color: #fff; border-color: #1f6feb; }
+        button.danger { background: #fff; color: #c62828; border-color: #e5a3a3; }
+        .row { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+        #incidents div { display: flex; justify-content: space-between; align-items: center; font-size: 13px; padding: 4px 0; border-bottom: 1px solid #eef1f3; }
+        #msg { font-size: 13px; min-height: 18px; }
+        .err { color: #c62828; }
+        .big { font-size: 20px; font-weight: 600; }
+        .popbtn { display: block; width: 100%; margin: 3px 0; text-align: left; }
+    </style>
+</head>
+<body>
+<div id="side">
+    <h1>Traffic Reroute</h1>
+    <div class="muted">Crowdsourced incidents + Dijkstra on real roads</div>
+    <div id="banner" class="banner">Loading map...</div>
+
+    <div class="box">
+        <h2>How to use</h2>
+        <div class="muted">1. Click a road, choose <b>Set as start</b>, then click another road and choose <b>Set as destination</b>.<br>
+            2. Click a road on the blue route and report an incident. The route re-calculates.<br>
+            3. Clear the incident to get the original route back.</div>
+    </div>
+
+    <div class="box">
+        <h2>Route</h2>
+        <div id="route" class="muted">Choose a start and a destination.</div>
+        <div class="row"><button id="swap">Swap</button><button id="resetPts">Reset points</button></div>
+    </div>
+
+    <div class="box">
+        <h2>Incidents (<span id="count">0</span>)</h2>
+        <div id="incidents" class="muted">None</div>
+        <div class="row"><button id="clearAll" class="danger">Clear all</button></div>
+    </div>
+    <div id="msg"></div>
+    <div class="muted" style="margin-top:10px">Grey = normal, orange = slow, red dashed = blocked, blue = your route.<br>Map data &copy; OpenStreetMap contributors.</div>
+</div>
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+    const API = '/api/v1';
+    const COLORS = { normal: '#7b8794', CONGESTION: '#f59e0b', ACCIDENT: '#ea580c', ROAD_BLOCK: '#dc2626' };
+    const map = L.map('map', { preferCanvas: true });
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    let edges = {};          // id -> {data, line}
+    let incidents = {};      // edgeId -> type
+    let start = null, end = null;   // {lat, lon}
+    let startMarker = null, endMarker = null, routeLine = null;
+
+    function say(text, isErr) {
+      const m = document.getElementById('msg');
+      m.textContent = text || '';
+      m.className = isErr ? 'err' : '';
+    }
+
+    async function call(method, url, body) {
+      const res = await fetch(API + url, {
+        method, headers: body ? { 'Content-Type': 'application/json' } : {},
+        body: body ? JSON.stringify(body) : undefined
+      });
+      if (res.status === 204) return null;
+      let data = null;
+      try { data = await res.json(); } catch (e) { /* no body */ }
+      if (!res.ok) throw new Error((data && (data.error || data.message)) || ('Error ' + res.status));
+      return data;
+    }
+
+    function styleFor(id) {
+      const t = incidents[id];
+      if (!t) return { color: COLORS.normal, weight: 3, opacity: 0.85, dashArray: null };
+      if (t === 'ROAD_BLOCK') return { color: COLORS.ROAD_BLOCK, weight: 6, opacity: 1, dashArray: '6 6' };
+      return { color: COLORS[t], weight: 6, opacity: 1, dashArray: null };
+    }
+
+    function restyleAll() { for (const id in edges) edges[id].line.setStyle(styleFor(+id)); }
+
+    function popupFor(e, latlng) {
+      const box = document.createElement('div');
+      const title = document.createElement('b');
+      title.textContent = e.name || '(unnamed road)';          // textContent: OSM names are untrusted
+      box.appendChild(title);
+      const info = document.createElement('div');
+      info.className = 'muted';
+      info.textContent = e.highway + ', ' + Math.round(e.lengthM) + ' m' + (e.oneway ? ', one-way' : '');
+      box.appendChild(info);
+      function btn(label, fn) {
+        const b = document.createElement('button');
+        b.className = 'popbtn'; b.textContent = label;
+        b.onclick = () => { map.closePopup(); fn(); };
+        box.appendChild(b);
+      }
+      btn('Set as start', () => setPoint('start', latlng));
+      btn('Set as destination', () => setPoint('end', latlng));
+      for (const [t, label] of [['ROAD_BLOCK', 'Road block'], ['ACCIDENT', 'Accident'], ['CONGESTION', 'Congestion']])
+        btn('Report: ' + label, () => report(e.id, t));
+      if (incidents[e.id]) btn('Clear incident here', () => clearOne(e.id));
+      return box;
+    }
+
+    function setPoint(which, latlng) {
+      const p = { lat: latlng.lat, lon: latlng.lng };
+      if (which === 'start') {
+        start = p;
+        if (startMarker) map.removeLayer(startMarker);
+        startMarker = L.marker(latlng).addTo(map).bindTooltip('Start');
+      } else {
+        end = p;
+        if (endMarker) map.removeLayer(endMarker);
+        endMarker = L.marker(latlng).addTo(map).bindTooltip('Destination');
+      }
+      findRoute();
+    }
+
+    async function findRoute() {
+      if (!start || !end) return;
+      const q = `?fromLat=${start.lat}&fromLon=${start.lon}&toLat=${end.lat}&toLon=${end.lon}`;
+      const box = document.getElementById('route');
+      try {
+        const r = await call('GET', '/route' + q);
+        if (routeLine) map.removeLayer(routeLine);
+        routeLine = L.polyline(r.coordinates, { color: '#1f6feb', weight: 7, opacity: 0.9, interactive: false }).addTo(map);
+        routeLine.bringToFront();
+        startMarker.setLatLng(r.start); endMarker.setLatLng(r.end);   // show where we snapped to
+        box.className = '';
+        box.textContent = '';
+        const big = document.createElement('div');
+        big.className = 'big'; big.textContent = r.minutes.toFixed(1) + ' min';
+        const sub = document.createElement('div');
+        sub.className = 'muted'; sub.textContent = (r.distanceMeters / 1000).toFixed(2) + ' km';
+        const via = document.createElement('div');
+        via.style.fontSize = '13px'; via.textContent = 'via ' + (r.streets.join(' > ') || '(unnamed roads)');
+        box.append(big, sub, via);
+        say('');
+      } catch (err) {
+        if (routeLine) { map.removeLayer(routeLine); routeLine = null; }
+        box.className = 'err'; box.textContent = err.message;
+      }
+    }
+
+    async function report(edgeId, type) {
+      try { await call('POST', '/incidents', { edgeId, type }); await refreshIncidents(); await findRoute(); say('Incident reported.'); }
+      catch (err) { say(err.message, true); }
+    }
+    async function clearOne(edgeId) {
+      try { await call('DELETE', '/incidents/' + edgeId); await refreshIncidents(); await findRoute(); say('Incident cleared.'); }
+      catch (err) { say(err.message, true); }
+    }
+
+    async function refreshIncidents() {
+      const list = await call('GET', '/incidents');
+      incidents = {};
+      const box = document.getElementById('incidents');
+      box.textContent = '';
+      for (const i of list) incidents[i.edgeId] = i.type;
+      document.getElementById('count').textContent = list.length;
+      if (!list.length) box.textContent = 'None';
+      for (const i of list) {
+        const row = document.createElement('div');
+        const label = document.createElement('span');
+        label.textContent = i.type.replace('_', ' ') + ': ' + (i.name || '(unnamed road)');
+        const b = document.createElement('button');
+        b.textContent = 'Clear'; b.onclick = () => clearOne(i.edgeId);
+        row.append(label, b); box.appendChild(row);
+      }
+      restyleAll();
+      if (routeLine) routeLine.bringToFront();
+    }
+
+    document.getElementById('clearAll').onclick = async () => {
+      try { await call('DELETE', '/incidents'); await refreshIncidents(); await findRoute(); say('All incidents cleared.'); }
+      catch (err) { say(err.message, true); }
+    };
+    document.getElementById('swap').onclick = () => {
+      if (!start || !end) return;
+      const s = start, e = end;
+      setPointSilent('start', e); setPointSilent('end', s); findRoute();
+    };
+    function setPointSilent(which, p) {
+      const ll = [p.lat, p.lon];
+      if (which === 'start') { start = p; startMarker.setLatLng(ll); } else { end = p; endMarker.setLatLng(ll); }
+    }
+    document.getElementById('resetPts').onclick = () => {
+      start = end = null;
+      for (const m of [startMarker, endMarker, routeLine]) if (m) map.removeLayer(m);
+      startMarker = endMarker = routeLine = null;
+      const box = document.getElementById('route');
+      box.className = 'muted'; box.textContent = 'Choose a start and a destination.';
+    };
+
+    async function init() {
+      const banner = document.getElementById('banner');
+      try {
+        const net = await call('GET', '/network');
+        // Long highways/rails stick far out of the area; zoom to where most roads are (3rd to 97th percentile).
+        const lats = [], lons = [];
+        for (const e of net.edges) for (const c of e.coords) { lats.push(c[0]); lons.push(c[1]); }
+        lats.sort((a, b) => a - b); lons.sort((a, b) => a - b);
+        const q = (arr, p) => arr[Math.floor((arr.length - 1) * p)];
+        map.fitBounds([[q(lats, 0.03), q(lons, 0.03)], [q(lats, 0.97), q(lons, 0.97)]]);
+        for (const e of net.edges) {
+          const line = L.polyline(e.coords, styleFor(e.id)).addTo(map);
+          line.on('click', ev => {
+            L.popup().setLatLng(ev.latlng).setContent(popupFor(e, ev.latlng)).openOn(map);
+            L.DomEvent.stopPropagation(ev);
+          });
+          edges[e.id] = { data: e, line };
+        }
+        const sample = net.source.toUpperCase().startsWith('SAMPLE');
+        banner.className = 'banner' + (sample ? ' warn' : '');
+        banner.textContent = (sample
+          ? 'Showing SAMPLE roads, not real OpenStreetMap data (download failed). '
+          : 'Real OpenStreetMap roads. ') + net.edges.length + ' road segments, ' + net.junctions + ' junctions.';
+        await refreshIncidents();
+      } catch (err) {
+        banner.className = 'banner warn';
+        banner.textContent = 'Could not load the map: ' + err.message;
+      }
+    }
+    init();
+</script>
+</body>
+</html>

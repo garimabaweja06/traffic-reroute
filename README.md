@@ -7,15 +7,15 @@ Java 21, Spring Boot 3.3, Dijkstra, Leaflet + OpenStreetMap. No database or Dock
 
 **1. Fastest route on real OpenStreetMap roads**
 
-![Route](docs/root.png)
+![Route](docs/1-route.png)
 
 **2. A road block is reported, and the route changes**
 
-![Road block](docs/roadblock.png)
+![Road block](docs/2-road-block.png)
 
 **3. Several incidents together, and the route adapts again**
 
-![Multiple incidents](docs/multiple%20incident.png)
+![Multiple incidents](docs/3-multiple-incident.png)
 
 ## Run
 1. Open the folder in IntelliJ (pom.xml -> Open as Project), wait for Maven to finish.
